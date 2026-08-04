@@ -113,7 +113,7 @@ typedef struct
 */
 void CFE_PSP_DisplayUsage(char *Name);
 void CFE_PSP_ProcessArgumentDefaults(CFE_PSP_CommandData_t *CommandDataDefault);
-void CFE_PSP_DisplayTryspaceSplash(void);
+void CFE_PSP_DisplayShireSplash(void);
 
 /*
 ** Global variables
@@ -238,9 +238,9 @@ void OS_Application_Startup(void)
     memset(&(CommandData), 0, sizeof(CFE_PSP_CommandData_t));
 
     /*
-    ** Display the TrySpace splash screen
+    ** Display the SHIRE splash screen
     */
-    CFE_PSP_DisplayTryspaceSplash();
+    CFE_PSP_DisplayShireSplash();
 
     /*
     ** Process the arguments with getopt_long(), then
@@ -605,7 +605,7 @@ void CFE_PSP_ProcessArgumentDefaults(CFE_PSP_CommandData_t *CommandDataDefault)
 /******************************************************************************
 **
 **  Purpose:
-**    Display the TrySpace splash screen
+**    Display the SHIRE splash screen
 **
 **  Arguments:
 **    (none)
@@ -613,7 +613,7 @@ void CFE_PSP_ProcessArgumentDefaults(CFE_PSP_CommandData_t *CommandDataDefault)
 **  Return:
 **    (none)
 */
-void CFE_PSP_DisplayTryspaceSplash(void)
+void CFE_PSP_DisplayShireSplash(void)
 {
     printf( \
     "                       _____ _    _ _____ _____  ______                  \n" \
