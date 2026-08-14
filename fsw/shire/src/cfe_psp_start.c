@@ -39,7 +39,6 @@
 #include <signal.h>
 #include <sys/time.h>
 #include <getopt.h>
-#include <string.h>
 #include <limits.h>
 #include <pthread.h>
 #include <sched.h>

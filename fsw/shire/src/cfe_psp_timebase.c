@@ -41,6 +41,7 @@
 #include <stdlib.h>
 #include <time.h>
 #include <pthread.h>
+#include <sched.h>
 
 #include "cfe_psp.h"
 #include "cfe_psp_module.h"
@@ -76,7 +77,9 @@ volatile uint64_t tick_generation = 0;
 void timebase_simulith_clock_Init(uint32 PspModuleId)
 {
     /* Inform the user that this module is in use */
+    (void)PspModuleId;
     printf("CFE_PSP: Using simulith clock as CFE timebase\n");
+    CFE_PSP_InitSimulithTime();
 }
 
 void CFE_PSP_InitSimulithTime(void)
@@ -106,7 +109,10 @@ void CFE_PSP_InitSimulithTime(void)
         tick_thread_running = true;
         if (pthread_create(&tick_distribution_thread, NULL, CFE_PSP_SimulithTickDistributionThread, NULL) != 0)
         {
+            tick_thread_running = false;
             printf("CFE_PSP: Failed to start tick distribution thread after handshake\n");
+            simulith_client_shutdown();
+            simulith_client_initialized = 0;
         }
     }
 }
@@ -123,8 +129,6 @@ void CFE_PSP_ShutdownSimulithTime(void)
         tick_thread_running = false;
         pthread_cond_broadcast(&tick_condition); // Wake the thread if waiting
         pthread_join(tick_distribution_thread, NULL);
-        pthread_cond_destroy(&tick_condition);
-        pthread_mutex_destroy(&tick_mutex);
         tick_generation = 0;
         latest_tick_time_ns = 0;
         previous_tick_time_ns = 0;
@@ -192,16 +196,17 @@ void CFE_PSP_GetSimulithTimespec(struct timespec *ts)
 void CFE_PSP_Get_Timebase(uint32 *Tbu, uint32 *Tbl)
 {
     struct timespec now;
-    
-    /* Use simulith time if available, otherwise fall back to system time */
-    if (simulith_client_initialized && latest_tick_time_ns > 0)
+    uint64_t sim_time_ns = CFE_PSP_GetSimulithTimeNs();
+
+    if (sim_time_ns > 0)
     {
-        CFE_PSP_GetSimulithTimespec(&now);
+        now.tv_sec  = sim_time_ns / 1000000000UL;
+        now.tv_nsec = sim_time_ns % 1000000000UL;
     }
-    else
+    else if (clock_gettime(CFE_PSP_TIMEBASE_REF_CLOCK, &now) != 0)
     {
-        /* Fall back to system monotonic clock during early initialization */
-        clock_gettime(CFE_PSP_TIMEBASE_REF_CLOCK, &now);
+        now.tv_sec  = 0;
+        now.tv_nsec = 0;
     }
     
     *Tbu = now.tv_sec & 0xFFFFFFFF;

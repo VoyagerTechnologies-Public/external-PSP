@@ -49,6 +49,7 @@
 
 #include <execinfo.h>
 #include <signal.h>
+#include <time.h>
 
 /*
  * A set of asynchronous signals which will be masked during other signal processing
@@ -87,7 +88,11 @@ void CFE_PSP_ExceptionSigHandler(int signo, siginfo_t *si, void *ctxt)
     Buffer = CFE_PSP_Exception_GetNextContextBuffer();
     if (Buffer != NULL)
     {
-        CFE_PSP_GetSimulithTimespec(&Buffer->context_info.event_time);
+        if (clock_gettime(CLOCK_MONOTONIC, &Buffer->context_info.event_time) != 0)
+        {
+            Buffer->context_info.event_time.tv_sec  = 0;
+            Buffer->context_info.event_time.tv_nsec = 0;
+        }
         
         memcpy(&Buffer->context_info.si, si, sizeof(Buffer->context_info.si));
         NumAddrs             = backtrace(Buffer->context_info.bt_addrs, CFE_PSP_MAX_EXCEPTION_BACKTRACE_SIZE);
