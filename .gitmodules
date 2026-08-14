@@ -1,0 +1,4 @@
+[submodule "fsw/hwlib"]
+	path = fsw/hwlib
+	url = git@github.com:VoyagerTechnologies-Public/external-hwlib.git
+	branch = main
