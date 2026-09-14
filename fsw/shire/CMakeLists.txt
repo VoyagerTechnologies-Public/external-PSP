@@ -8,7 +8,6 @@
 # run CFE on this target.
 
 # Simulith hardware library sources (sim implementations)
-set(SIMULITH_BUILD_DIR "${CMAKE_SOURCE_DIR}/../simulith/build")
 set(HWLIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../hwlib")
 if(EXISTS "${HWLIB_DIR}/src/sim/libcan.c")
     set(HWLIB_SRC_FILES
@@ -55,12 +54,5 @@ target_include_directories(psp-${CFE_PSP_TARGETNAME}-impl PRIVATE
     ../../../../simulith/include
 )
 
-# Link Simulith library for hwlib sim implementations
+# Simulith is linked through osal_public_api by the SHIRE OSAL implementation.
 set(PSP_IMPL_LIBRARIES zmq PARENT_SCOPE)
-if(EXISTS "${SIMULITH_BUILD_DIR}/libsimulith.so")
-    message(STATUS "shire PSP: Linking Simulith library: ${SIMULITH_BUILD_DIR}/libsimulith.so")
-    set(PSP_IMPL_LIBRARIES "${SIMULITH_BUILD_DIR}/libsimulith.so" zmq PARENT_SCOPE)
-else()
-    message(WARNING "shire PSP: Simulith library not found at ${SIMULITH_BUILD_DIR}/libsimulith.so")
-endif()
-
