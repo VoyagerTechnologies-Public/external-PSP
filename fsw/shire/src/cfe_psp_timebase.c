@@ -58,6 +58,19 @@
  * and on targets that do not provide simulated device transports. */
 void simulith_transport_write_metrics_json(FILE *stream) __attribute__((weak));
 
+/* cFE TIME's internal 1Hz tone-signal ISR (declared in the TIME module's
+ * private cfe_time_utils.h, not a public PSP-facing header -- declared
+ * directly here rather than including that header, since nothing else in
+ * this file needs it). See CFE_TIME_TaskInit()'s own comment in
+ * cfe_time_task.c: when the OSAL has no "cFS-Master" timebase for it to
+ * hook its own 1Hz callback to, "the PSP must use the old way and call the
+ * 1hz function directly" -- exactly the situation here, since this PSP's
+ * time is simulith-tick-driven rather than backed by a generic OSAL timer.
+ * Weak, like simulith_transport_write_metrics_json above, so this file
+ * still links standalone (e.g. coverage-io_lib-shire_psp_runtime-testrunner,
+ * which builds this PSP source without the TIME module). */
+extern void CFE_TIME_Tone1HzISR(void) __attribute__((weak));
+
 /*
  * The specific clock ID to use with clock_gettime
  *
@@ -975,6 +988,7 @@ void* CFE_PSP_SimulithTickDistributionThread(void* arg)
     uint64_t tick_time_ns;
     uint64_t tick_sequence;
     simulith_phase_t tick_phase;
+    uint64_t next_tone_ns = 0;
     for (;;)
     {
         pthread_mutex_lock(&tick_mutex);
@@ -1089,6 +1103,25 @@ void* CFE_PSP_SimulithTickDistributionThread(void* arg)
             pthread_cond_broadcast(&tick_condition);
             bool complete_immediately = pending_tick_auto_completion;
             pthread_mutex_unlock(&tick_mutex);
+
+            /* CFE_TIME_TaskInit() only creates its own 1Hz tone driver when
+             * the OSAL exposes a "cFS-Master" timebase (see its comment:
+             * absent that, "the PSP must use the old way and call the 1hz
+             * function directly"). This PSP has no such timebase -- time
+             * here is simulith-tick-driven, not backed by a generic OSAL
+             * timer -- so drive the tone directly, keyed to simulated time
+             * (not wall-clock) so it stays correctly paced under
+             * simulith_speed scaling and matches what CFE_TIME_LatchClock()
+             * (via CFE_PSP_GetTime()) reads. Must run outside tick_mutex:
+             * CFE_TIME_Tone1HzISR() -> CFE_TIME_LatchClock() ->
+             * CFE_PSP_GetTime() re-acquires it. */
+            if (CFE_TIME_Tone1HzISR && tick_time_ns >= next_tone_ns)
+            {
+                uint64_t periods = ((tick_time_ns - next_tone_ns) / 1000000000ULL) + 1ULL;
+                for (uint64_t period = 0; period < periods; ++period)
+                    CFE_TIME_Tone1HzISR();
+                next_tone_ns += periods * 1000000000ULL;
+            }
 
             /* During cFE startup no scheduler exists to own completion. Once
              * SCH enables deferred mode, only SCH may release the next tick. */
