@@ -16,6 +16,10 @@
  * limitations under the License.
  ************************************************************************/
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 /**
  * \file
  *
@@ -46,6 +50,9 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <math.h>
+#include <linux/futex.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 
 #include "cfe_psp.h"
 #include "cfe_psp_module.h"
@@ -99,6 +106,20 @@ static bool pending_tick_auto_completion = false;
 static bool deferred_tick_completion = false;
 static pthread_mutex_t tick_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t tick_condition = PTHREAD_COND_INITIALIZER;
+/* Dedicated generation mailbox for the receiver -> SCH handoff. Other cFE
+ * tick and participant waiters retain tick_condition and its accounting. */
+static uint32_t sch_mailbox_generation = 0;
+static uint64_t sch_mailbox_published_ns = 0;
+static uint64_t sch_handoff_count = 0;
+static uint64_t sch_handoff_total_ns = 0;
+static uint64_t sch_handoff_max_ns = 0;
+
+static void CFE_PSP_WakeSchMailbox(void)
+{
+    __atomic_add_fetch(&sch_mailbox_generation, 1U, __ATOMIC_RELEASE);
+    (void)syscall(SYS_futex, &sch_mailbox_generation, FUTEX_WAKE_PRIVATE, 1,
+                  NULL, NULL, 0);
+}
 static pthread_t tick_distribution_thread;
 static pthread_t bootstrap_tick_thread;
 static bool bootstrap_tick_running = false;
@@ -397,6 +418,7 @@ void CFE_PSP_InitSimulithTime(void)
         pending_tick_sequence = 0;
         latest_tick_time_ns = 0;
         tick_generation = 0;
+        sch_handoff_count = sch_handoff_total_ns = sch_handoff_max_ns = 0;
         simulith_participant_count = 0;
         simulith_pipe_behavior_count = 0;
         simulith_participant_accounting_error = false;
@@ -451,6 +473,7 @@ int CFE_PSP_StartSynchronizedTicks(void)
         simulith_client_created = 0;
         pthread_cond_broadcast(&tick_condition);
         pthread_mutex_unlock(&tick_mutex);
+        CFE_PSP_WakeSchMailbox();
         simulith_client_shutdown();
         return -1;
     }
@@ -466,6 +489,7 @@ int CFE_PSP_StartSynchronizedTicks(void)
         simulith_client_initialized = 0;
         pthread_cond_broadcast(&tick_condition);
         pthread_mutex_unlock(&tick_mutex);
+        CFE_PSP_WakeSchMailbox();
         printf("CFE_PSP: Failed to start tick distribution thread after handshake\n");
         return -1;
     }
@@ -482,6 +506,7 @@ void CFE_PSP_StopSynchronizedTicks(void)
     tick_thread_running = false;
     pthread_cond_broadcast(&tick_condition);
     pthread_mutex_unlock(&tick_mutex);
+    CFE_PSP_WakeSchMailbox();
     simulith_client_request_stop();
 }
 
@@ -504,6 +529,7 @@ void CFE_PSP_ShutdownSimulithTime(void)
             tick_thread_running = false;
             pthread_cond_broadcast(&tick_condition);
             pthread_mutex_unlock(&tick_mutex);
+            CFE_PSP_WakeSchMailbox();
             simulith_client_request_stop();
             pthread_join(tick_distribution_thread, NULL);
         }
@@ -557,16 +583,32 @@ unsigned int CFE_PSP_WaitForSimulithTick(unsigned int ticks_to_wait)
 
 int CFE_PSP_WaitForPendingSimulithTick(void)
 {
-    pthread_mutex_lock(&tick_mutex);
-    while (tick_thread_running &&
-           (!pending_tick_completion || pending_tick_dispatched ||
-            pending_tick_auto_completion))
-        pthread_cond_wait(&tick_condition, &tick_mutex);
-    int result = pending_tick_completion ? 0 : -1;
-    if (result == 0)
-        pending_tick_dispatched = true;
-    pthread_mutex_unlock(&tick_mutex);
-    return result;
+    for (;;) {
+        /* Observe the generation before testing the predicate under the
+         * mutex. A publish between the predicate and FUTEX_WAIT then returns
+         * EAGAIN rather than losing a wakeup. */
+        uint32_t observed = __atomic_load_n(&sch_mailbox_generation,
+                                             __ATOMIC_ACQUIRE);
+        pthread_mutex_lock(&tick_mutex);
+        if (!tick_thread_running) {
+            pthread_mutex_unlock(&tick_mutex);
+            return -1;
+        }
+        if (pending_tick_completion && !pending_tick_dispatched &&
+            !pending_tick_auto_completion) {
+            uint64_t latency_ns = CFE_PSP_MonotonicNs() - sch_mailbox_published_ns;
+            sch_handoff_count++;
+            sch_handoff_total_ns += latency_ns;
+            if (latency_ns > sch_handoff_max_ns)
+                sch_handoff_max_ns = latency_ns;
+            pending_tick_dispatched = true;
+            pthread_mutex_unlock(&tick_mutex);
+            return 0;
+        }
+        pthread_mutex_unlock(&tick_mutex);
+        (void)syscall(SYS_futex, &sch_mailbox_generation,
+                      FUTEX_WAIT_PRIVATE, observed, NULL, NULL, 0);
+    }
 }
 
 void CFE_PSP_EnableDeferredTickCompletion(void)
@@ -1003,6 +1045,7 @@ void* CFE_PSP_SimulithTickDistributionThread(void* arg)
             tick_thread_running = false;
             pthread_cond_broadcast(&tick_condition);
             pthread_mutex_unlock(&tick_mutex);
+            CFE_PSP_WakeSchMailbox();
             pthread_mutex_lock(&tick_mutex);
             printf("SIMULITH_FSW_TERMINAL {\"sch_ticks\":%" PRIu64
                    ",\"participants_registered\":%" PRIu64
@@ -1012,6 +1055,8 @@ void* CFE_PSP_SimulithTickDistributionThread(void* arg)
                    ",\"ground_output_sent\":%" PRIu64
                    ",\"ground_output_throttled\":%" PRIu64
                    ",\"ground_output_mid\":%u"
+                   ",\"sch_handoff_us\":{\"count\":%" PRIu64
+                   ",\"mean\":%.3f,\"max\":%.3f}"
                    ",\"participant_latency_resolution_us\":5"
                    ",\"participant_histogram_max_us\":10240"
                    ",\"participant_latency\":[",
@@ -1019,7 +1064,12 @@ void* CFE_PSP_SimulithTickDistributionThread(void* arg)
                    simulith_participants_completed, simulith_participants_canceled,
                    simulith_ground_output_due, simulith_ground_output_sent,
                    simulith_ground_output_throttled,
-                   simulith_ground_output_message_id);
+                   simulith_ground_output_message_id,
+                   sch_handoff_count,
+                   sch_handoff_count ?
+                       (double)sch_handoff_total_ns /
+                       (double)sch_handoff_count / 1000.0 : 0.0,
+                   (double)sch_handoff_max_ns / 1000.0);
             for (size_t index = 0; index < simulith_participant_metric_count; ++index)
             {
                 const simulith_participant_metric_t *metric =
@@ -1100,9 +1150,11 @@ void* CFE_PSP_SimulithTickDistributionThread(void* arg)
             simulith_participant_count = 0;
             simulith_participant_accounting_error = false;
             tick_generation++;
+            sch_mailbox_published_ns = CFE_PSP_MonotonicNs();
             pthread_cond_broadcast(&tick_condition);
             bool complete_immediately = pending_tick_auto_completion;
             pthread_mutex_unlock(&tick_mutex);
+            CFE_PSP_WakeSchMailbox();
 
             /* CFE_TIME_TaskInit() only creates its own 1Hz tone driver when
              * the OSAL exposes a "cFS-Master" timebase (see its comment:
