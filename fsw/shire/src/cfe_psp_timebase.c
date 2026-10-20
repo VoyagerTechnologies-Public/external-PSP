@@ -97,7 +97,6 @@ CFE_PSP_MODULE_DECLARE_SIMPLE(timebase_simulith_clock);
 
 static int simulith_client_initialized = 0;
 static int simulith_client_created = 0;
-static bool simulith_time_valid = false;
 static uint64_t latest_tick_time_ns = 0;
 static uint64_t pending_tick_sequence = 0;
 static bool pending_tick_completion = false;
@@ -392,7 +391,7 @@ void CFE_PSP_InitSimulithTime(void)
 {
     if (!simulith_client_created)
     {
-        int status = simulith_client_init(LOCAL_PUB_ADDR, LOCAL_REP_ADDR, "shire-fsw", INTERVAL_NS);
+        int status = simulith_client_init(simulith_pub_address(0), simulith_rep_address(0), "shire-fsw", INTERVAL_NS);
         if (status != 0)
         {
             printf("CFE_PSP: simulith_client_init failed: %d\n", status);
@@ -410,7 +409,6 @@ void CFE_PSP_InitSimulithTime(void)
         pthread_mutex_lock(&tick_mutex);
         simulith_client_created = 1;
         simulith_client_initialized = 0;
-        simulith_time_valid = false;
         deferred_tick_completion = false;
         pending_tick_completion = false;
         pending_tick_dispatched = false;
@@ -538,7 +536,6 @@ void CFE_PSP_ShutdownSimulithTime(void)
         pthread_mutex_lock(&tick_mutex);
         simulith_client_initialized = 0;
         simulith_client_created = 0;
-        simulith_time_valid = false;
         deferred_tick_completion = false;
         pending_tick_completion = false;
         pending_tick_dispatched = false;
@@ -1142,7 +1139,6 @@ void* CFE_PSP_SimulithTickDistributionThread(void* arg)
                 continue;
             pthread_mutex_lock(&tick_mutex);
             latest_tick_time_ns = tick_time_ns;
-            simulith_time_valid = true;
             pending_tick_sequence = tick_sequence;
             pending_tick_completion = true;
             pending_tick_dispatched = false;
@@ -1207,7 +1203,11 @@ void CFE_PSP_Get_Timebase(uint32 *Tbu, uint32 *Tbl)
 
     pthread_mutex_lock(&tick_mutex);
     sim_time_ns = latest_tick_time_ns;
-    use_simulith_time = simulith_client_initialized && simulith_time_valid;
+    /* cFE consumers (notably EVS token accounting) must never see the host
+     * boot clock followed by simulation sequence zero. Bootstrap scheduling
+     * still uses wall time, but the platform clock starts at logical zero as
+     * soon as this simulated platform is initialized. */
+    use_simulith_time = simulith_client_created;
     pthread_mutex_unlock(&tick_mutex);
     if (use_simulith_time)
     {
@@ -1228,9 +1228,10 @@ void CFE_PSP_GetTime(OS_time_t *LocalTime)
 {
     struct timespec now;
 
-    /* Use simulith time if available, otherwise fall back to system time */
+    /* Keep the cFE clock at logical zero during bootstrap. Switching from a
+     * wall clock to zero would invalidate monotonic consumers such as EVS. */
     pthread_mutex_lock(&tick_mutex);
-    bool use_simulith_time = simulith_client_initialized && simulith_time_valid;
+    bool use_simulith_time = simulith_client_created;
     if (use_simulith_time)
     {
         now.tv_sec = latest_tick_time_ns / 1000000000UL;
