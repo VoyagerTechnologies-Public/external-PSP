@@ -181,6 +181,13 @@ typedef struct
     bool observed_blocking_receive;
 } simulith_pipe_behavior_t;
 
+/* Pipes whose owning task has exited. Scheduled messages can still be routed to such a pipe until Executive Services
+ * finishes cleaning the application up, and nothing will ever consume them, so they must not be tracked as
+ * participants. The list is a ring because only the most recent exits can still have routes. */
+#define CFE_PSP_MAX_RETIRED_PIPES 64
+static uint32_t simulith_retired_pipes[CFE_PSP_MAX_RETIRED_PIPES];
+static size_t simulith_retired_pipe_next = 0;
+
 static simulith_participant_t simulith_participants[CFE_PSP_MAX_SIMULITH_PARTICIPANTS];
 static size_t simulith_participant_count = 0;
 static simulith_pipe_behavior_t simulith_pipe_behaviors[CFE_PSP_MAX_SIMULITH_PIPES];
@@ -550,6 +557,15 @@ void CFE_PSP_ShutdownSimulithTime(void)
     }
 }
 
+/* Released by a task that is cancelled while it waits for a tick. OSAL stops an application's tasks with
+ * pthread_cancel, and pthread_cond_wait is a cancellation point that returns with the mutex held. Without this the
+ * cancelled task would exit still owning the mutex and every later reader of the simulated time would block forever. */
+static void CFE_PSP_UnlockTickMutexOnCancel(void *unused)
+{
+    (void)unused;
+    pthread_mutex_unlock(&tick_mutex);
+}
+
 unsigned int CFE_PSP_WaitForSimulithTick(unsigned int ticks_to_wait)
 {  
     pthread_once(&tick_cursor_once, CFE_PSP_CreateTickCursorKey);
@@ -562,6 +578,7 @@ unsigned int CFE_PSP_WaitForSimulithTick(unsigned int ticks_to_wait)
         (void)pthread_setspecific(tick_cursor_key, cursor);
     }
     pthread_mutex_lock(&tick_mutex);
+    pthread_cleanup_push(CFE_PSP_UnlockTickMutexOnCancel, NULL);
     if (!cursor->initialized)
     {
         cursor->generation = tick_generation;
@@ -574,7 +591,7 @@ unsigned int CFE_PSP_WaitForSimulithTick(unsigned int ticks_to_wait)
     }
     if (tick_generation >= target_generation)
         cursor->generation = target_generation;
-    pthread_mutex_unlock(&tick_mutex);
+    pthread_cleanup_pop(1);
     return ticks_to_wait;
 }
 
@@ -664,6 +681,15 @@ int CFE_PSP_ReserveSimulithMessageDelivery(uint32_t message_id,
     {
         pthread_mutex_unlock(&tick_mutex);
         return 0;
+    }
+
+    for (size_t index = 0; index < CFE_PSP_MAX_RETIRED_PIPES; ++index)
+    {
+        if (pipe_id != 0 && simulith_retired_pipes[index] == pipe_id)
+        {
+            pthread_mutex_unlock(&tick_mutex);
+            return 0;
+        }
     }
 
     simulith_participant_t *parent;
@@ -797,6 +823,38 @@ void CFE_PSP_CancelSimulithParticipant(int token)
     pthread_mutex_unlock(&tick_mutex);
 }
 
+void CFE_PSP_SimulithTaskExit(void)
+{
+    simulith_task_participant_t *task = CFE_PSP_FindTaskParticipant();
+    if (task == NULL)
+        return;
+
+    pthread_mutex_lock(&tick_mutex);
+    uint32_t pipe_id = task->pipe_id;
+    if (pipe_id != 0)
+    {
+        /* The exiting task will never receive again. Anything already routed to its pipe for the tick in progress,
+         * including the activation it is finishing now, would otherwise hold that tick open forever, and with it
+         * the simulated clock that Executive Services needs to finish cleaning the application up. */
+        for (size_t index = 0; index < simulith_participant_count; ++index)
+        {
+            simulith_participant_t *participant = &simulith_participants[index];
+            if (participant->delivery_bound && !participant->completed && participant->pipe_id == pipe_id)
+            {
+                participant->claimed = true;
+                participant->completed = true;
+                simulith_participants_canceled++;
+            }
+        }
+        simulith_retired_pipes[simulith_retired_pipe_next] = pipe_id;
+        simulith_retired_pipe_next = (simulith_retired_pipe_next + 1) % CFE_PSP_MAX_RETIRED_PIPES;
+        pthread_cond_broadcast(&tick_condition);
+    }
+    task->token = 0;
+    task->pipe_id = 0;
+    pthread_mutex_unlock(&tick_mutex);
+}
+
 void CFE_PSP_SimulithTaskBeginReceive(uint32_t pipe_id, bool polling)
 {
     simulith_task_participant_t *task = CFE_PSP_FindTaskParticipant();
@@ -927,6 +985,7 @@ bool CFE_PSP_AllowPeriodicGroundOutput(uint32_t message_id)
 
 int CFE_PSP_WaitForSimulithParticipants(void)
 {
+    uint64_t stall_report_ns = 0;
     pthread_mutex_lock(&tick_mutex);
     if (simulith_participant_accounting_error)
     {
@@ -949,8 +1008,15 @@ int CFE_PSP_WaitForSimulithParticipants(void)
         struct timespec deadline;
         clock_gettime(CLOCK_REALTIME, &deadline);
         deadline.tv_sec++;
-        if (pthread_cond_timedwait(&tick_condition, &tick_mutex, &deadline) == ETIMEDOUT)
+        (void)pthread_cond_timedwait(&tick_condition, &tick_mutex, &deadline);
+        /* Report by elapsed time and not by the wait timing out, because completions elsewhere wake this wait often
+         * enough that it might never time out while a participant is still missing. */
+        uint64_t now_ns = CFE_PSP_MonotonicNs();
+        if (stall_report_ns == 0)
+            stall_report_ns = now_ns;
+        if (now_ns - stall_report_ns >= UINT64_C(1000000000))
         {
+            stall_report_ns = now_ns;
             printf("CFE_PSP: Simulith sequence %lu stalled; waiting for",
                    (unsigned long)pending_tick_sequence);
             for (size_t index = 0; index < simulith_participant_count; ++index)

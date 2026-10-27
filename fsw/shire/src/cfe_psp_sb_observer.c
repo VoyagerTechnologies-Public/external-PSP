@@ -58,3 +58,8 @@ void CFE_SB_Observer_MessageReceived(CFE_SB_MsgId_t         RoutingMsgId,
                                         Buffer);
     }
 }
+
+void CFE_SB_Observer_TaskExit(void)
+{
+    CFE_PSP_SimulithTaskExit();
+}

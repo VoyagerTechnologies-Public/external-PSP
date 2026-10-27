@@ -21,6 +21,7 @@ void CFE_PSP_EndSimulithMessageDelivery(int token, bool delivered);
 void CFE_PSP_EndSimulithMessagePublication(void);
 void CFE_PSP_CancelSimulithParticipant(int token);
 void CFE_PSP_SimulithTaskBeginReceive(uint32_t pipe_id, bool polling);
+void CFE_PSP_SimulithTaskExit(void);
 void CFE_PSP_SimulithMessageReceived(uint32_t message_id,
                                      uint32_t pipe_id,
                                      const void *message_ref);
