@@ -398,7 +398,7 @@ void CFE_PSP_InitSimulithTime(void)
 {
     if (!simulith_client_created)
     {
-        int status = simulith_client_init(simulith_pub_address(0), simulith_rep_address(0), "shire-fsw", INTERVAL_NS);
+        int status = simulith_client_init(simulith_pub_address(0), simulith_rep_address(0), simulith_client_id("shire-fsw"), INTERVAL_NS);
         if (status != 0)
         {
             printf("CFE_PSP: simulith_client_init failed: %d\n", status);
